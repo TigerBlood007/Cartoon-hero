@@ -30,6 +30,11 @@ PAGE = """<!doctype html><html><head><title>Polymarket Research Bot</title>
 <td class="num">{{ stats[l].hour }}</td><td class="num">{{ stats[l].total }}</td>
 <td class="num">{{ '%+.2f' % stats[l].pnl }}</td>
 <td class="num">{{ '%.1f%%' % (stats[l].wr * 100) }}</td></tr>{% endfor %}</table>
+<h2>Edge decay instruments</h2>
+<table><tr><th>metric</th><th>value</th></tr>
+<tr><td>median signal detection latency</td><td class="num">{{ '%.0f ms' % det_ms }}</td></tr>
+<tr><td>avg slippage vs source fill</td><td class="num">{{ '%+.4f' % slip }}</td></tr>
+<tr><td>total modeled taker fees</td><td class="num">{{ '%.2f USDC' % fees }}</td></tr></table>
 <h2>Layer 2 vs Layer 3 win rate by category</h2>
 <table><tr><th>category</th><th>L2 win rate</th><th>L2 trades</th><th>L3 win rate</th><th>L3 trades</th></tr>
 {% for row in comparison %}<tr><td>{{ row.category }}</td>
@@ -81,6 +86,15 @@ def index():
         stats[layer] = type("S", (), {"total": row["total"], "hour": row["hour"] or 0,
                                       "pnl": row["pnl"], "wr": row["wr"]})
 
+    lat = [r["detection_latency_ms"] for r in db.execute(
+        "SELECT detection_latency_ms FROM layer_one_signals WHERE "
+        "detection_latency_ms IS NOT NULL ORDER BY ts DESC LIMIT 200")]
+    det_ms = sorted(lat)[len(lat) // 2] if lat else 0
+    row = db.execute("SELECT COALESCE(AVG(slippage),0) s, COALESCE(SUM(fee_usdc),0) f "
+                     "FROM layer_two_executions WHERE is_paper=0 "
+                     "AND status NOT IN ('failed','skipped')").fetchone()
+    slip, fees = row["s"], row["f"]
+
     comparison = []
     for cat_row in db.execute("SELECT DISTINCT category FROM bot_metadata "
                               "WHERE category IS NOT NULL ORDER BY category"):
@@ -109,7 +123,8 @@ def index():
     return render_template_string(
         PAGE, dry_run=config.dry_run, alive=alive, stale=len(hb) - alive,
         total_bots=len(hb), halted=halted, l1_hour=l1_hour, l1_total=l1_total,
-        stats=stats, comparison=comparison, top=top, trades=trades)
+        stats=stats, comparison=comparison, top=top, trades=trades,
+        det_ms=det_ms, slip=slip, fees=fees)
 
 
 if __name__ == "__main__":

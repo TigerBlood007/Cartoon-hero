@@ -24,6 +24,7 @@ from bot.layer_three import LayerThree
 from bot.logging_setup import setup_logging
 from bot.news import NewsFilter
 from bot.risk import RiskManager
+from bot.stream import ActivityStream
 
 
 async def fan_out(source: asyncio.Queue[Signal],
@@ -53,7 +54,10 @@ async def amain() -> None:
     conn = ConnectionManager(config)
     await conn.start()
 
-    layer_one = LayerOne(config, conn, db)
+    stream = ActivityStream(
+        config["chain"]["rtds_url"],
+        silence_timeout=float(config["runtime"]["ws_silence_timeout_seconds"]))
+    layer_one = LayerOne(config, conn, db, stream)
     l2_queue: asyncio.Queue[Signal] = asyncio.Queue()
     l3_queue: asyncio.Queue[Signal] = asyncio.Queue()
     layer_two = LayerTwo(config, conn, db, l2_queue)
@@ -62,6 +66,7 @@ async def amain() -> None:
     risk = RiskManager(config, db, [layer_two, layer_three])
 
     tasks = [
+        asyncio.create_task(stream.run(), name="activity-stream"),
         asyncio.create_task(layer_one.run(), name="layer-one"),
         asyncio.create_task(fan_out(layer_one.signal_queue, [l2_queue, l3_queue]),
                             name="signal-fan-out"),
@@ -80,6 +85,7 @@ async def amain() -> None:
 
     await stop.wait()
     log.info("Shutdown requested; cancelling tasks")
+    stream.close()
     for t in tasks:
         t.cancel()
     await asyncio.gather(*tasks, return_exceptions=True)

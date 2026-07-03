@@ -23,6 +23,12 @@ CREATE TABLE IF NOT EXISTS traders (
     last_trade_ts       REAL,
     conviction_bin      INTEGER,          -- 10/25/50/75/100 trade threshold
     active              INTEGER DEFAULT 1,
+    score               REAL DEFAULT 0,   -- composite fee-adjusted skill score 0..1
+    roi_7d              REAL DEFAULT 0,
+    roi_30d             REAL DEFAULT 0,
+    roi_90d             REAL DEFAULT 0,
+    edge_vs_price       REAL DEFAULT 0,   -- Wilson-lb win rate minus avg entry price
+    concentration       REAL DEFAULT 0,   -- share of pnl from single biggest market
     updated_ts          REAL,
     PRIMARY KEY (wallet, category)
 );
@@ -35,10 +41,13 @@ CREATE TABLE IF NOT EXISTS layer_one_signals (
     market_slug     TEXT,
     category        TEXT NOT NULL,
     outcome         TEXT NOT NULL,        -- YES / NO token side
+    side            TEXT NOT NULL DEFAULT 'BUY',  -- BUY = entry, SELL = exit signal
     token_id        TEXT,
     size_usdc       REAL NOT NULL,
     price           REAL NOT NULL,
     confidence      REAL NOT NULL,
+    detected_ts     REAL,                 -- when the stream delivered it to us
+    detection_latency_ms REAL,            -- detected_ts - trade ts (edge decay meter)
     detector_bot_id TEXT NOT NULL,
     source_trade_id TEXT,
     UNIQUE (source_wallet, source_trade_id)
@@ -53,10 +62,16 @@ CREATE TABLE IF NOT EXISTS layer_two_executions (
     condition_id    TEXT NOT NULL,
     outcome         TEXT NOT NULL,
     exec_price      REAL,
+    source_price    REAL,                         -- what the copied trader paid
+    slippage        REAL,                         -- exec_price - source_price
+    latency_ms      REAL,                         -- source trade ts -> our submit
+    fee_usdc        REAL DEFAULT 0,               -- modeled taker fee paid
+    exec_mode       TEXT,                         -- taker / post_only / dry
     size_usdc       REAL NOT NULL,
+    shares          REAL DEFAULT 0,
     filled_ts       REAL,
     filled_size     REAL DEFAULT 0,               -- partial-fill tracking
-    status          TEXT NOT NULL,                -- dry_run/open/filled/partial/skipped/failed/resolved
+    status          TEXT NOT NULL,                -- dry_run/open/filled/partial/skipped/failed/resolved/exited
     current_pnl     REAL DEFAULT 0,
     is_paper        INTEGER DEFAULT 0,            -- $5000 paper sim rows
     order_id        TEXT

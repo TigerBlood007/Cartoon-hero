@@ -7,39 +7,64 @@ chain:
   data_api_host: "https://data-api.polymarket.com"
   gamma_api_host: "https://gamma-api.polymarket.com"
   leaderboard_api_host: "https://lb-api.polymarket.com"
-  ws_market_url: "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+  # Public real-time activity socket: every platform trade, sub-second, no auth.
+  rtds_url: "wss://ws-live-data.polymarket.com"
 
+# Geopolitics added deliberately: it is the only fee-free category (Mar 2026
+# schedule), so identical edge nets more there than anywhere else.
 categories:
   - Google
   - Bitcoin
   - Politics
   - Economics
   - Weather
+  - Geopolitics
 
-# Conviction bins: minimum category trade count for a trader to qualify.
+# Modeled taker fee rates by category (effective fee at 50c entry; the actual
+# charge follows the p*(1-p) curve, peaking mid-price). Makers pay zero.
+fees:
+  taker_rates:
+    Bitcoin: 0.018        # crypto: highest fee tier
+    Economics: 0.015
+    Weather: 0.0125
+    Google: 0.010         # tech
+    Politics: 0.010
+    Geopolitics: 0.0      # fee-free
+  maker_rate: 0.0
+
+# Conviction bins: minimum RESOLVED category trade count for a trader to qualify.
 conviction_thresholds: [10, 25, 50, 75, 100]
 
 layers:
   layer_one:
-    bot_count: 100                   # 5 categories x 5 conviction bins x 4 replicas
-    leaderboard_poll_seconds: 900    # 15 minutes
-    trade_poll_seconds: 5            # how often trader trade feeds are polled
+    bot_count: 100                   # detector cells: categories x bins x replicas
+    leaderboard_poll_seconds: 900    # discovery + rescoring cycle (15 min)
+    score_scans_per_cycle: 25        # trade-history scans per cycle (rate-limit budget)
+    min_tracked_score: 0.30          # wallets below this composite score are not copied
     inactive_after_hours: 24         # trader with no trades in 24h is dropped
   layer_two:
     bot_count: 100
     confidence_threshold: 0.60
-    scale_factor: 0.01               # copy 1% of source trader's size
-    per_bot_allocation_usdc: 1.00
+    scale_factor: 0.01               # copy 1% of source trader's stake...
+    per_position_usdc: 5.00          # ...clamped to this per position. NOTE: the
+                                     # exchange requires 5 shares minimum on limit
+                                     # orders, so true $1 positions are impossible
+                                     # above 20c — sizing bumps to the minimum.
     max_total_exposure_usdc: 100.00
-    latency_budget_seconds: 1.0      # skip signals older than this
-    order_type: "maker_mid"          # limit at mid-price for maker rebates
+    latency_budget_seconds: 3.0      # stream detection is sub-second; >3s = stale
+    max_slippage: 0.02               # skip if ask moved >2c past the source fill
+    max_taker_spread: 0.03           # spreads wider than 3c enter post-only instead
+    max_entry_price: 0.90            # never chase near-certainties
   layer_three:
     bot_count: 100
     confidence_threshold: 0.60
     scale_factor: 0.01
-    per_bot_allocation_usdc: 1.00
+    per_position_usdc: 5.00
     max_total_exposure_usdc: 100.00
-    latency_budget_seconds: 1.0
+    latency_budget_seconds: 3.0
+    max_slippage: 0.02
+    max_taker_spread: 0.03
+    max_entry_price: 0.90
     news_filter_enabled: true
     catalyst_boost: 0.5              # effective = conf * (1 + boost * catalyst)
     news_cache_seconds: 3600         # cache news checks 1h per market slug
@@ -48,18 +73,16 @@ layers:
 risk:
   max_open_positions_per_market: 1   # no pyramiding
   max_concurrent_positions_per_bot: 3
-  circuit_breaker_pnl_usdc: -2.00    # halt bot below -200% of $1 allocation
+  circuit_breaker_pnl_usdc: -10.00   # halt bot below -200% of $5 allocation
   reallocation_trade_interval: 10    # re-evaluate every N trades...
   reallocation_hours_interval: 12    # ...or every N hours, whichever first
-  top_performer_win_rate: 0.55
-  bottom_performer_win_rate: 0.45
-  min_trades_for_evaluation: 10
+  min_trades_for_evaluation: 15      # below this, Wilson bounds are inconclusive
   required_allowance_usdc: 300.00    # approx. total exposure across all layers
 
 paper_trading:
   enabled: true
   allocation_usdc: 5000.00
-  scale_factor: 0.50                 # what 1% edge looks like at 50% scale
+  scale_factor: 0.50                 # what the edge looks like at 50% of source size
 
 news:
   provider: "newsapi"

@@ -1,9 +1,20 @@
-"""Layer One: signal detection.
+"""Layer One: signal detection (stream-driven).
 
-One hundred $1 micro-bot instances (5 categories x 5 conviction bins x 4
-replicas), each monitoring the top trader in its (category, conviction) pair.
-Polls the leaderboard every 15 minutes, trader trade feeds every few seconds,
-and writes confidence-scored signals to layer_one_signals. Never trades.
+One hundred detector cells (5 categories x 5 conviction bins x 4 replicas)
+define the research grid. Detection itself is push-based: every platform trade
+arrives on Polymarket's public activity socket in well under a second, and we
+match it against the set of wallets our scorer currently rates as worth
+copying. Data-API polling survives only as the history backfill the scorer
+reads — never as the detection path (5-30s lag = dead edge).
+
+Discovery draws candidates from two pools: the leaderboard (seed only — it
+surfaces the most-copied wallets) and wallets observed live on the stream
+making clean category trades. The TraderScorer decides who actually gets
+tracked; raw leaderboard rank never does.
+
+Exits are signals too: a tracked wallet SELLing a market we copied emits a
+SELL signal so execution layers can mirror the exit instead of riding a
+position its source already abandoned.
 """
 
 from __future__ import annotations
@@ -17,6 +28,8 @@ from dataclasses import dataclass, field
 from .config import Config
 from .connection import ConnectionManager
 from .database import Database
+from .scoring import TraderScorer
+from .stream import ActivityStream
 
 log = logging.getLogger("layer1")
 
@@ -24,12 +37,14 @@ log = logging.getLogger("layer1")
 @dataclass
 class Signal:
     signal_id: str
-    ts: float
+    ts: float                  # when the source trade happened
+    detected_ts: float         # when the stream delivered it to us
     source_wallet: str
     condition_id: str
     market_slug: str
     category: str
     outcome: str
+    side: str                  # BUY = entry signal, SELL = exit signal
     token_id: str
     size_usdc: float
     price: float
@@ -44,21 +59,27 @@ class L1Bot:
     conviction_bin: int
     replica: int
     monitored_wallet: str | None = None
-    seen_trade_ids: set[str] = field(default_factory=set)
 
 
 class LayerOne:
-    def __init__(self, config: Config, conn: ConnectionManager, db: Database):
+    def __init__(self, config: Config, conn: ConnectionManager, db: Database,
+                 stream: ActivityStream):
         self.config = config
         self.conn = conn
         self.db = db
+        self.stream = stream
+        self.scorer = TraderScorer(config, conn, db)
         self.bots: list[L1Bot] = []
         self.signal_queue: asyncio.Queue[Signal] = asyncio.Queue()
+        self._tracked: dict[str, list[L1Bot]] = {}      # wallet -> detector cells
+        self._seen_trade_ids: set[str] = set()
+        self._candidate_counts: dict[str, int] = {}     # stream-discovered wallets
+        self._scored_recently: dict[str, float] = {}
         self._category_keywords = {c.lower(): c for c in config.categories}
         self._build_bots()
+        stream.on_trade(self._on_stream_trade)
 
     def _build_bots(self) -> None:
-        """5 categories x 5 conviction bins x 4 replicas = 100 instances."""
         replicas = self.config["layers"]["layer_one"]["bot_count"] // (
             len(self.config.categories) * len(self.config.conviction_thresholds))
         now = time.time()
@@ -74,177 +95,146 @@ class LayerOne:
             "INSERT INTO bot_metadata (bot_id, layer, category, conviction_bin, "
             "scale_factor, news_filter, source_wallet, allocation_usdc, updated_ts) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(bot_id) DO NOTHING",
-            rows,
-        )
-        log.info("Layer One initialized with %d signal bots", len(self.bots))
+            rows)
+        log.info("Layer One initialized with %d detector cells", len(self.bots))
 
-    # ── Leaderboard / trader profiling (every 15 minutes) ────────────────────
-
-    def _categorize(self, title_or_slug: str) -> str | None:
-        text = (title_or_slug or "").lower()
+    def _categorize(self, text: str) -> str | None:
+        text = (text or "").lower()
         for kw, category in self._category_keywords.items():
             if kw in text:
                 return category
         return None
 
+    # ── Discovery + scoring cycle (every 15 minutes) ─────────────────────────
+
     async def refresh_traders(self) -> None:
-        """Fetch leaderboard, compute per-category win rates and conviction
-        bins, store in traders table, and (re)assign each bot's target."""
-        leaders = await self.conn.fetch_leaderboard()
-        if not leaders:
-            log.warning("Leaderboard empty this cycle; keeping previous assignments")
-            return
+        """Score leaderboard seeds and stream-discovered candidates, then
+        reassign each detector cell to the best-scored wallet in its
+        (category, conviction) pair."""
+        candidates: list[str] = []
+        for entry in await self.conn.fetch_leaderboard():
+            w = entry.get("proxyWallet") or entry.get("wallet") or entry.get("address")
+            if w:
+                candidates.append(w)
+        # Stream discovery: wallets seen trading our categories most often.
+        hot = sorted(self._candidate_counts, key=self._candidate_counts.get,
+                     reverse=True)[:30]
+        candidates.extend(hot)
+        self._candidate_counts.clear()
 
-        inactive_cutoff = time.time() - 3600 * float(
-            self.config["layers"]["layer_one"]["inactive_after_hours"])
-        thresholds = sorted(self.config.conviction_thresholds, reverse=True)
-
-        for entry in leaders[:100]:
-            wallet = entry.get("proxyWallet") or entry.get("wallet") or entry.get("address")
-            if not wallet:
-                continue
-            lifetime_pnl = float(entry.get("amount") or entry.get("pnl") or 0)
-            trades = await self.conn.fetch_trader_trades(wallet, limit=100)
-            per_cat: dict[str, dict] = {}
-            for t in trades:
-                category = self._categorize(t.get("title") or t.get("slug") or "")
-                if not category:
-                    continue
-                stats = per_cat.setdefault(category,
-                                           {"wins": 0, "total": 0, "last_ts": 0.0})
-                stats["total"] += 1
-                stats["last_ts"] = max(stats["last_ts"],
-                                       float(t.get("timestamp") or 0))
-                # Winning trade proxy: redeemable / profitable outcome flag if
-                # exposed, else price improvement on resolved markets.
-                if t.get("outcome") == t.get("winningOutcome") or t.get("profit", 0) > 0:
-                    stats["wins"] += 1
-            for category, stats in per_cat.items():
-                win_rate = stats["wins"] / stats["total"] if stats["total"] else 0.0
-                conviction_bin = next(
-                    (th for th in thresholds if stats["total"] >= th), 0)
-                active = 1 if stats["last_ts"] >= inactive_cutoff else 0
-                if not active:
-                    log.warning("Trader %s inactive >24h in %s; removed from sources",
-                                wallet[:10], category)
-                self.db.execute(
-                    "INSERT INTO traders (wallet, category, lifetime_pnl, "
-                    "category_win_rate, category_trade_count, last_trade_ts, "
-                    "conviction_bin, active, updated_ts) VALUES (?,?,?,?,?,?,?,?,?) "
-                    "ON CONFLICT(wallet, category) DO UPDATE SET "
-                    "lifetime_pnl=excluded.lifetime_pnl, "
-                    "category_win_rate=excluded.category_win_rate, "
-                    "category_trade_count=excluded.category_trade_count, "
-                    "last_trade_ts=excluded.last_trade_ts, "
-                    "conviction_bin=excluded.conviction_bin, "
-                    "active=excluded.active, updated_ts=excluded.updated_ts",
-                    (wallet, category, lifetime_pnl, win_rate, stats["total"],
-                     stats["last_ts"], conviction_bin, active, time.time()),
-                )
+        now = time.time()
+        budget = int(self.config["layers"]["layer_one"]["score_scans_per_cycle"])
+        scanned = 0
+        for wallet in dict.fromkeys(candidates):
+            if scanned >= budget:
+                break
+            if now - self._scored_recently.get(wallet, 0) < 6 * 3600:
+                continue  # rescore each wallet at most every 6h
+            self._scored_recently[wallet] = now
+            scanned += 1
+            for s in await self.scorer.score_trader(wallet):
+                self.scorer.persist(s)
+        log.info("Scoring cycle done: %d wallets scanned", scanned)
         self._assign_targets()
 
     def _assign_targets(self) -> None:
-        """Point each bot at the top active trader in its (category, bin) pair.
-        Replicas take rank 1st/2nd/3rd/4th so the 4 bots per pair diversify."""
+        """Rank tracked wallets by composite score (never leaderboard rank).
+        Replicas take ranks 1-4 so each (category, bin) pair diversifies
+        across four wallets — the portfolio approach."""
+        min_score = float(self.config["layers"]["layer_one"]["min_tracked_score"])
+        self._tracked.clear()
         for bot in self.bots:
             rows = self.db.query(
                 "SELECT wallet FROM traders WHERE category = ? AND active = 1 "
-                "AND conviction_bin >= ? ORDER BY category_win_rate DESC, "
-                "lifetime_pnl DESC LIMIT 4",
-                (bot.category, bot.conviction_bin),
-            )
+                "AND conviction_bin >= ? AND score >= ? "
+                "ORDER BY score DESC, edge_vs_price DESC LIMIT 4",
+                (bot.category, bot.conviction_bin, min_score))
             new_wallet = rows[min(bot.replica, len(rows) - 1)]["wallet"] if rows else None
             if new_wallet != bot.monitored_wallet:
-                log.info("%s now monitoring %s", bot.bot_id,
-                         (new_wallet or "nobody")[:12])
+                log.info("%s now monitoring %s", bot.bot_id, (new_wallet or "nobody")[:12])
                 bot.monitored_wallet = new_wallet
-                bot.seen_trade_ids.clear()
                 self.db.execute(
                     "UPDATE bot_metadata SET source_wallet = ?, updated_ts = ? "
                     "WHERE bot_id = ?", (new_wallet, time.time(), bot.bot_id))
+            if new_wallet:
+                self._tracked.setdefault(new_wallet, []).append(bot)
+        log.info("Tracking %d unique wallets across %d cells",
+                 len(self._tracked), sum(len(v) for v in self._tracked.values()))
 
-    # ── Trade detection loop ─────────────────────────────────────────────────
+    # ── Stream callback: the actual detection path ───────────────────────────
 
-    def _confidence(self, wallet: str, category: str) -> float:
+    async def _on_stream_trade(self, p: dict, detected_ts: float) -> None:
+        wallet = str(p.get("proxyWallet") or "")
+        category = self._categorize(p.get("slug") or p.get("eventSlug") or "")
+        if not wallet:
+            return
+        if wallet not in self._tracked:
+            if category:  # count for stream discovery
+                self._candidate_counts[wallet] = self._candidate_counts.get(wallet, 0) + 1
+            return
+
+        trade_id = str(p.get("transactionHash") or "") + str(p.get("asset") or "")
+        if not trade_id or trade_id in self._seen_trade_ids:
+            return
+        self._seen_trade_ids.add(trade_id)
+        if len(self._seen_trade_ids) > 50000:
+            self._seen_trade_ids.clear()
+
+        cells = [b for b in self._tracked[wallet] if b.category == category]
+        if not cells:
+            return
+        bot = cells[0]
+        ts = float(p.get("timestamp") or detected_ts)
+        if ts > 1e12:
+            ts /= 1000.0
+        latency_ms = max(0.0, (detected_ts - ts) * 1000)
+
         row = self.db.query_one(
-            "SELECT category_win_rate, category_trade_count FROM traders "
-            "WHERE wallet = ? AND category = ?", (wallet, category))
-        if not row:
-            return 0.0
-        return min(1.0, row["category_win_rate"] * row["category_trade_count"] / 100.0)
+            "SELECT score FROM traders WHERE wallet = ? AND category = ?",
+            (wallet, category))
+        confidence = float(row["score"]) if row else 0.0
 
-    async def detect_once(self) -> int:
-        """Poll each monitored wallet once (deduped across replicas) and emit
-        signals for unseen trades. Returns number of new signals."""
-        wallets = {b.monitored_wallet for b in self.bots if b.monitored_wallet}
-        trades_by_wallet: dict[str, list[dict]] = {}
-        for wallet in wallets:
-            trades_by_wallet[wallet] = await self.conn.fetch_trader_trades(wallet, limit=20)
+        sig = Signal(
+            signal_id=str(uuid.uuid4()), ts=ts, detected_ts=detected_ts,
+            source_wallet=wallet, condition_id=str(p.get("conditionId") or ""),
+            market_slug=str(p.get("slug") or ""), category=category,
+            outcome=str(p.get("outcome") or "YES"),
+            side=str(p.get("side") or "BUY").upper(),
+            token_id=str(p.get("asset") or ""),
+            size_usdc=float(p.get("size") or 0) * float(p.get("price") or 0),
+            price=float(p.get("price") or 0), confidence=confidence,
+            detector_bot_id=bot.bot_id)
+        try:
+            self.db.execute(
+                "INSERT INTO layer_one_signals (signal_id, ts, source_wallet, "
+                "condition_id, market_slug, category, outcome, side, token_id, "
+                "size_usdc, price, confidence, detected_ts, detection_latency_ms, "
+                "detector_bot_id, source_trade_id) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (sig.signal_id, sig.ts, sig.source_wallet, sig.condition_id,
+                 sig.market_slug, sig.category, sig.outcome, sig.side,
+                 sig.token_id, sig.size_usdc, sig.price, sig.confidence,
+                 sig.detected_ts, latency_ms, bot.bot_id, trade_id))
+        except Exception:  # UNIQUE(source_wallet, source_trade_id) race
+            return
+        await self.signal_queue.put(sig)
+        log.info("SIGNAL %s: %s %s %.2f USDC on %s @ %.3f (conf %.2f, det %.0fms)",
+                 sig.signal_id[:8], wallet[:10], sig.side, sig.size_usdc,
+                 sig.outcome, sig.price, sig.confidence, latency_ms)
 
-        emitted = 0
-        for bot in self.bots:
-            self.db.heartbeat(bot.bot_id, 1)
-            wallet = bot.monitored_wallet
-            if not wallet:
-                continue
-            for t in trades_by_wallet.get(wallet, []):
-                trade_id = str(t.get("transactionHash") or t.get("id") or "")
-                if not trade_id or trade_id in bot.seen_trade_ids:
-                    continue
-                bot.seen_trade_ids.add(trade_id)
-                category = self._categorize(t.get("title") or t.get("slug") or "")
-                if category != bot.category:
-                    continue
-                ts = float(t.get("timestamp") or time.time())
-                if time.time() - ts > 120:   # stale history on first poll
-                    continue
-                confidence = self._confidence(wallet, category)
-                sig = Signal(
-                    signal_id=str(uuid.uuid4()),
-                    ts=ts,
-                    source_wallet=wallet,
-                    condition_id=str(t.get("conditionId") or ""),
-                    market_slug=str(t.get("slug") or ""),
-                    category=category,
-                    outcome=str(t.get("outcome") or "YES"),
-                    token_id=str(t.get("asset") or t.get("tokenId") or ""),
-                    size_usdc=float(t.get("size") or 0) * float(t.get("price") or 0),
-                    price=float(t.get("price") or 0),
-                    confidence=confidence,
-                    detector_bot_id=bot.bot_id,
-                )
-                try:
-                    self.db.execute(
-                        "INSERT INTO layer_one_signals (signal_id, ts, source_wallet, "
-                        "condition_id, market_slug, category, outcome, token_id, "
-                        "size_usdc, price, confidence, detector_bot_id, source_trade_id) "
-                        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                        (sig.signal_id, sig.ts, sig.source_wallet, sig.condition_id,
-                         sig.market_slug, sig.category, sig.outcome, sig.token_id,
-                         sig.size_usdc, sig.price, sig.confidence, sig.detector_bot_id,
-                         trade_id),
-                    )
-                except Exception:  # UNIQUE(source_wallet, source_trade_id) race
-                    continue
-                if sig.token_id:
-                    self.conn.subscribe_assets({sig.token_id})
-                await self.signal_queue.put(sig)
-                emitted += 1
-                log.info("SIGNAL %s: %s bet %.2f USDC on %s @ %.3f (conf %.2f)",
-                         sig.signal_id[:8], wallet[:10], sig.size_usdc,
-                         sig.outcome, sig.price, sig.confidence)
-        return emitted
+    # ── Maintenance loop (heartbeats, periodic rescoring) ────────────────────
 
     async def run(self) -> None:
-        poll_s = float(self.config["layers"]["layer_one"]["trade_poll_seconds"])
         lb_s = float(self.config["layers"]["layer_one"]["leaderboard_poll_seconds"])
+        hb = float(self.config["runtime"]["heartbeat_seconds"])
         last_lb = 0.0
         while True:
             try:
                 if time.time() - last_lb >= lb_s:
                     await self.refresh_traders()
                     last_lb = time.time()
-                await self.detect_once()
+                for bot in self.bots:
+                    self.db.heartbeat(bot.bot_id, 1)
             except Exception:  # noqa: BLE001
-                log.exception("Layer One loop error")
-            await asyncio.sleep(poll_s)
+                log.exception("Layer One maintenance error")
+            await asyncio.sleep(hb)
