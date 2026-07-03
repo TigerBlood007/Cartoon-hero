@@ -1,0 +1,8 @@
+.env
+*.db
+*.db-wal
+*.db-shm
+polymarket-bot.log
+__pycache__/
+*.pyc
+.venv/

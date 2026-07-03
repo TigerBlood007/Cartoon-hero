@@ -1,0 +1,79 @@
+# Polymarket Multi-Layer Copy Trading Research Bot — configuration template.
+# Secrets (private key, API creds, news key) live in .env, NEVER here.
+
+chain:
+  chain_id: 137                      # Polygon mainnet
+  clob_host: "https://clob.polymarket.com"
+  data_api_host: "https://data-api.polymarket.com"
+  gamma_api_host: "https://gamma-api.polymarket.com"
+  leaderboard_api_host: "https://lb-api.polymarket.com"
+  ws_market_url: "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+
+categories:
+  - Google
+  - Bitcoin
+  - Politics
+  - Economics
+  - Weather
+
+# Conviction bins: minimum category trade count for a trader to qualify.
+conviction_thresholds: [10, 25, 50, 75, 100]
+
+layers:
+  layer_one:
+    bot_count: 100                   # 5 categories x 5 conviction bins x 4 replicas
+    leaderboard_poll_seconds: 900    # 15 minutes
+    trade_poll_seconds: 5            # how often trader trade feeds are polled
+    inactive_after_hours: 24         # trader with no trades in 24h is dropped
+  layer_two:
+    bot_count: 100
+    confidence_threshold: 0.60
+    scale_factor: 0.01               # copy 1% of source trader's size
+    per_bot_allocation_usdc: 1.00
+    max_total_exposure_usdc: 100.00
+    latency_budget_seconds: 1.0      # skip signals older than this
+    order_type: "maker_mid"          # limit at mid-price for maker rebates
+  layer_three:
+    bot_count: 100
+    confidence_threshold: 0.60
+    scale_factor: 0.01
+    per_bot_allocation_usdc: 1.00
+    max_total_exposure_usdc: 100.00
+    latency_budget_seconds: 1.0
+    news_filter_enabled: true
+    catalyst_boost: 0.5              # effective = conf * (1 + boost * catalyst)
+    news_cache_seconds: 3600         # cache news checks 1h per market slug
+    news_lookback_hours: 24
+
+risk:
+  max_open_positions_per_market: 1   # no pyramiding
+  max_concurrent_positions_per_bot: 3
+  circuit_breaker_pnl_usdc: -2.00    # halt bot below -200% of $1 allocation
+  reallocation_trade_interval: 10    # re-evaluate every N trades...
+  reallocation_hours_interval: 12    # ...or every N hours, whichever first
+  top_performer_win_rate: 0.55
+  bottom_performer_win_rate: 0.45
+  min_trades_for_evaluation: 10
+  required_allowance_usdc: 300.00    # approx. total exposure across all layers
+
+paper_trading:
+  enabled: true
+  allocation_usdc: 5000.00
+  scale_factor: 0.50                 # what 1% edge looks like at 50% scale
+
+news:
+  provider: "newsapi"
+  endpoint: "https://newsapi.org/v2/everything"
+  minor_news_threshold: 1            # >=1 article in window -> 0.3
+  major_news_threshold: 5            # >=5 articles or major keywords -> 0.7
+  major_keywords: ["earnings", "regulat", "SEC", "FOMC", "rate decision",
+                   "indictment", "election", "hurricane", "FDA", "merger"]
+
+runtime:
+  database_path: "polymarket_bot.db"
+  log_file: "polymarket-bot.log"
+  heartbeat_seconds: 30
+  ws_silence_timeout_seconds: 300    # 5-minute silent-drop detection
+  dashboard_host: "127.0.0.1"
+  dashboard_port: 5000
+  dry_run: true                      # .env DRY_RUN must ALSO be "false" to go live

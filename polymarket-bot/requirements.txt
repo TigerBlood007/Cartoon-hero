@@ -1,0 +1,13 @@
+# Core trading client for Polymarket CLOB (v2 API)
+py-clob-client>=0.17.0
+
+# Async HTTP + WebSocket for data API polling and market streams
+aiohttp>=3.9.0
+websockets>=12.0
+
+# Config / env
+python-dotenv>=1.0.0
+PyYAML>=6.0
+
+# Dashboard
+Flask>=3.0.0
