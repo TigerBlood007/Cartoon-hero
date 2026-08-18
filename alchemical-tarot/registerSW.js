@@ -1,0 +1,1 @@
+if('serviceWorker' in navigator) {window.addEventListener('load', () => {navigator.serviceWorker.register('/Cartoon-hero/alchemical-tarot/sw.js', { scope: '/Cartoon-hero/alchemical-tarot/' })})}
