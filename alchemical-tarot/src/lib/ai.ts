@@ -1,17 +1,22 @@
+import Anthropic from '@anthropic-ai/sdk';
 import type { DrawnCard } from '../data/cardTypes';
 import type { MoonPhaseInfo } from './astro';
+import type { AiModel } from './settings';
 
 interface SynthesisInput {
   cards: { label: string; drawn: DrawnCard }[];
   question?: string;
   moon: MoonPhaseInfo;
+  model: AiModel;
 }
 
-// Calls the Anthropic API directly from the browser using a key the user
-// supplies and stores locally (Settings screen). This never ships a
-// bundled key — without one, callers should fall back to the traditional
-// written meanings instead of calling this at all.
+// Calls Anthropic directly from the browser using a key the user supplies
+// and stores locally (Settings screen). This never ships a bundled key —
+// without one, callers should fall back to the traditional written
+// meanings instead of calling this at all.
 export async function synthesizeReading(apiKey: string, input: SynthesisInput): Promise<string> {
+  const client = new Anthropic({ apiKey, dangerouslyAllowBrowser: true });
+
   const cardLines = input.cards
     .map(({ label, drawn }) => {
       const orientation = drawn.reversed ? 'reversed' : 'upright';
@@ -29,27 +34,29 @@ ${input.question ? `Her question: ${input.question}` : 'No specific question —
 Cards drawn:
 ${cardLines}`;
 
-  const response = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      'x-api-key': apiKey,
-      'anthropic-version': '2023-06-01',
-      'anthropic-dangerous-direct-browser-access': 'true',
-    },
-    body: JSON.stringify({
-      model: 'claude-sonnet-4-5',
-      max_tokens: 1024,
+  try {
+    const response = await client.messages.create({
+      model: input.model,
+      max_tokens: 1500,
       messages: [{ role: 'user', content: prompt }],
-    }),
-  });
+    });
 
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`AI synthesis failed (${response.status}): ${text.slice(0, 200)}`);
+    if (response.stop_reason === 'refusal') {
+      throw new Error('The model declined to generate this reading.');
+    }
+
+    const textBlock = response.content.find((block) => block.type === 'text');
+    return textBlock?.text ?? '';
+  } catch (error) {
+    if (error instanceof Anthropic.AuthenticationError) {
+      throw new Error('That API key was rejected — double-check it in Settings.');
+    }
+    if (error instanceof Anthropic.RateLimitError) {
+      throw new Error('Rate limited by Anthropic — try again in a moment.');
+    }
+    if (error instanceof Anthropic.APIError) {
+      throw new Error(`AI synthesis failed (${error.status}): ${error.message}`);
+    }
+    throw error;
   }
-
-  const data = await response.json();
-  const textBlock = data.content?.find((block: any) => block.type === 'text');
-  return textBlock?.text ?? '';
 }

@@ -1,7 +1,8 @@
-export type View = 'draw' | 'journal' | 'astrology' | 'settings';
+export type View = 'draw' | 'library' | 'journal' | 'astrology' | 'settings';
 
 const ITEMS: { view: View; icon: string; label: string }[] = [
   { view: 'draw', icon: '🃏', label: 'Draw' },
+  { view: 'library', icon: '📜', label: 'Library' },
   { view: 'journal', icon: '📖', label: 'Journal' },
   { view: 'astrology', icon: '☽', label: 'Astrology' },
   { view: 'settings', icon: '⚙︎', label: 'Settings' },

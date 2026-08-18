@@ -11,6 +11,7 @@
     "start": "serve -s dist -l tcp://0.0.0.0:${PORT:-3000}"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.117.1",
     "astronomy-engine": "^2.1.19",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",

@@ -25,6 +25,7 @@ export interface Reading {
   moonPhase: string;
   question?: string;
   position: 'three-card' | 'single' | 'supporting';
+  source: 'digital' | 'physical';
   cards: { label: string; drawn: DrawnCard }[];
   notes?: string;
   aiSynthesis?: string;

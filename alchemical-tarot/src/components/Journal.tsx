@@ -27,6 +27,7 @@ export function Journal({ readings, onDelete }: { readings: Reading[]; onDelete:
               <h3 style={{ margin: 0 }}>{date.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}</h3>
               <span className="muted">{r.moonPhase}</span>
             </div>
+            <span className="tag">{r.source === 'physical' ? 'Real-life pull' : 'Shuffled in app'}</span>
             {r.question && <p style={{ fontStyle: 'italic' }}>"{r.question}"</p>}
             <div className="muted">{r.cards.map((c) => `${c.drawn.card.name}${c.drawn.reversed ? ' (R)' : ''}`).join(' · ')}</div>
 

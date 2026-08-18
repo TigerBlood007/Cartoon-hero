@@ -1,4 +1,5 @@
 const KEY_STORAGE = 'alchemical-tarot-anthropic-key';
+const MODEL_STORAGE = 'alchemical-tarot-anthropic-model';
 const BIRTH_STORAGE = 'alchemical-tarot-birth-profile';
 const NOTIFY_STORAGE = 'alchemical-tarot-notify-hour';
 
@@ -9,6 +10,21 @@ export function getApiKey(): string {
 export function setApiKey(key: string) {
   if (key) localStorage.setItem(KEY_STORAGE, key);
   else localStorage.removeItem(KEY_STORAGE);
+}
+
+export type AiModel = 'claude-haiku-4-5' | 'claude-sonnet-5' | 'claude-opus-5';
+export const DEFAULT_AI_MODEL: AiModel = 'claude-sonnet-5';
+
+export function getAiModel(): AiModel {
+  const stored = localStorage.getItem(MODEL_STORAGE);
+  if (stored === 'claude-haiku-4-5' || stored === 'claude-sonnet-5' || stored === 'claude-opus-5') {
+    return stored;
+  }
+  return DEFAULT_AI_MODEL;
+}
+
+export function setAiModel(model: AiModel) {
+  localStorage.setItem(MODEL_STORAGE, model);
 }
 
 export interface BirthProfile {

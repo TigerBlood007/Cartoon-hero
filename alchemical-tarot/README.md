@@ -11,6 +11,11 @@ works on Android, iPhone, and desktop from one codebase, no app store needed.
   Marie-Louise von Franz and Jung's work on individuation.
 - **Past · Present · Future spread**, single-card draws, and the ability to
   pull supporting cards mid-reading when a spread isn't clear yet.
+- **Record a real-life pull** — log cards drawn from a physical deck (search
+  the full 78-card list, mark reversed) instead of shuffling in-app; both
+  paths feed the same reveal/journal flow and are tagged in the journal.
+- **Library** — every card's full meaning, browsable and searchable anytime,
+  independent of doing a reading.
 - **Reversals**, toggleable.
 - **Moon phase**, computed locally.
 - **Birth chart** (Sun, Moon, Ascendant, and all planets) computed locally
@@ -22,8 +27,10 @@ works on Android, iPhone, and desktop from one codebase, no app store needed.
   synthesis) is stored locally on the device and can be revisited anytime.
 - **Optional AI-synthesized readings** — bring your own Anthropic API key
   (Settings) to have a reading synthesized across the drawn cards, grounded
-  in the traditional meanings. Without a key, full traditional meanings are
-  always shown — nothing is gated behind AI.
+  in the traditional meanings. Choice of model (Haiku 4.5 / Sonnet 5 /
+  Opus 5) with cost guidance in-app; defaults to Sonnet 5 as the best
+  value for this kind of writing. Without a key, full traditional meanings
+  are always shown — nothing is gated behind AI.
 - **Daily nudge notification**, best-effort (see in-app note on background
   delivery limits for a keyless, serverless PWA).
 

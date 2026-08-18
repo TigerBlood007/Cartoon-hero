@@ -1,71 +1,103 @@
 import { useState } from 'react';
-import type { DrawnCard, Reading } from '../data/cardTypes';
+import type { Card, DrawnCard, Reading } from '../data/cardTypes';
 import { drawCards } from '../data/deck';
 import { CardBack, CardFace } from './CardFace';
 import { CardDetail } from './CardDetail';
+import { CardPicker } from './CardPicker';
 import type { MoonPhaseInfo } from '../lib/astro';
 import { synthesizeReading } from '../lib/ai';
+import type { AiModel } from '../lib/settings';
 
 type SpreadType = 'single' | 'three-card';
+type Mode = 'digital' | 'physical';
+type Slot = { label: string; drawn: DrawnCard | null };
 
 const LABELS_THREE = ['Past', 'Present', 'Future'];
 
 export function DrawScreen({
   moon,
   apiKey,
+  aiModel,
   onSave,
 }: {
   moon: MoonPhaseInfo;
   apiKey: string;
+  aiModel: AiModel;
   onSave: (reading: Reading) => void;
 }) {
+  const [mode, setMode] = useState<Mode>('digital');
   const [spreadType, setSpreadType] = useState<SpreadType>('three-card');
   const [allowReversals, setAllowReversals] = useState(true);
   const [question, setQuestion] = useState('');
-  const [drawn, setDrawn] = useState<{ label: string; drawn: DrawnCard }[] | null>(null);
+  const [slots, setSlots] = useState<Slot[] | null>(null);
   const [revealed, setRevealed] = useState<Set<number>>(new Set());
-  const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
-  const [supporting, setSupporting] = useState<{ label: string; drawn: DrawnCard }[]>([]);
+  const [selected, setSelected] = useState<{ list: 'main' | 'supporting'; index: number } | null>(null);
+  const [supporting, setSupporting] = useState<Slot[]>([]);
+  const [pickingSupporting, setPickingSupporting] = useState(false);
   const [notes, setNotes] = useState('');
   const [aiText, setAiText] = useState('');
   const [aiLoading, setAiLoading] = useState(false);
   const [aiError, setAiError] = useState('');
   const [saved, setSaved] = useState(false);
 
-  function beginDraw() {
-    const count = spreadType === 'single' ? 1 : 3;
+  function resetFor(newMode: Mode) {
+    setMode(newMode);
+  }
+
+  function begin() {
     const labels = spreadType === 'single' ? ['Reading'] : LABELS_THREE;
-    const cards = drawCards(count, allowReversals);
-    setDrawn(labels.map((label, i) => ({ label, drawn: cards[i] })));
-    setRevealed(new Set());
+    if (mode === 'digital') {
+      const cards = drawCards(labels.length, allowReversals);
+      setSlots(labels.map((label, i) => ({ label, drawn: cards[i] })));
+      setRevealed(new Set());
+    } else {
+      setSlots(labels.map((label) => ({ label, drawn: null })));
+    }
     setSupporting([]);
     setNotes('');
     setAiText('');
     setAiError('');
     setSaved(false);
-    setSelectedIndex(null);
+    setSelected(null);
+    setPickingSupporting(false);
   }
 
   function reveal(i: number) {
     setRevealed((prev) => new Set(prev).add(i));
   }
 
-  function pullSupporting() {
-    if (!drawn) return;
-    const usedIds = [...drawn, ...supporting].map((d) => d.drawn.card.id);
+  function fillNextSlot(card: Card, reversed: boolean) {
+    if (!slots) return;
+    const nextIndex = slots.findIndex((s) => s.drawn === null);
+    if (nextIndex === -1) return;
+    const next = [...slots];
+    next[nextIndex] = { ...next[nextIndex], drawn: { card, reversed } };
+    setSlots(next);
+  }
+
+  function pullSupportingDigital() {
+    if (!slots) return;
+    const usedIds = [...slots, ...supporting].filter((s) => s.drawn).map((s) => s.drawn!.card.id);
     const [card] = drawCards(1, allowReversals, usedIds);
     setSupporting((prev) => [...prev, { label: `Supporting ${prev.length + 1}`, drawn: card }]);
   }
 
+  function addSupportingPhysical(card: Card, reversed: boolean) {
+    setSupporting((prev) => [...prev, { label: `Supporting ${prev.length + 1}`, drawn: { card, reversed } }]);
+    setPickingSupporting(false);
+  }
+
   async function runAiSynthesis() {
-    if (!drawn || !apiKey) return;
+    if (!slots || !apiKey) return;
+    const filled = [...slots, ...supporting].filter((s): s is { label: string; drawn: DrawnCard } => s.drawn !== null);
     setAiLoading(true);
     setAiError('');
     try {
       const text = await synthesizeReading(apiKey, {
-        cards: [...drawn, ...supporting],
+        cards: filled,
         question: question || undefined,
         moon,
+        model: aiModel,
       });
       setAiText(text);
     } catch (e: any) {
@@ -76,14 +108,16 @@ export function DrawScreen({
   }
 
   function saveToJournal() {
-    if (!drawn) return;
+    if (!slots) return;
+    const filled = [...slots, ...supporting].filter((s): s is { label: string; drawn: DrawnCard } => s.drawn !== null);
     const reading: Reading = {
       id: crypto.randomUUID(),
       date: new Date().toISOString(),
       moonPhase: moon.name,
       question: question || undefined,
       position: spreadType,
-      cards: [...drawn, ...supporting],
+      source: mode,
+      cards: filled,
       notes: notes || undefined,
       aiSynthesis: aiText || undefined,
     };
@@ -91,8 +125,12 @@ export function DrawScreen({
     setSaved(true);
   }
 
-  const allCards = drawn ? [...drawn, ...supporting] : [];
-  const allRevealed = drawn ? drawn.every((_, i) => revealed.has(i)) : false;
+  const allFilled = slots ? slots.every((s) => s.drawn !== null) : false;
+  const allRevealed = mode === 'physical' ? allFilled : slots ? slots.every((_, i) => revealed.has(i)) : false;
+  const selectedDrawn =
+    selected && slots
+      ? (selected.list === 'main' ? slots[selected.index]?.drawn : supporting[selected.index]?.drawn)
+      : null;
 
   return (
     <div>
@@ -103,8 +141,19 @@ export function DrawScreen({
         {moon.name.toLowerCase()} — let that color what you're asking.
       </p>
 
-      {!drawn && (
+      {!slots && (
         <div className="panel">
+          <div className="field">
+            <label>How were these cards pulled?</label>
+            <div className="spread-choice">
+              <button className={`chip${mode === 'digital' ? ' selected' : ''}`} onClick={() => resetFor('digital')}>
+                Shuffle in the app
+              </button>
+              <button className={`chip${mode === 'physical' ? ' selected' : ''}`} onClick={() => resetFor('physical')}>
+                Record a real-life pull
+              </button>
+            </div>
+          </div>
           <div className="field">
             <label>Spread</label>
             <div className="spread-choice">
@@ -126,57 +175,80 @@ export function DrawScreen({
             <label>What's on your mind (optional)</label>
             <textarea value={question} onChange={(e) => setQuestion(e.target.value)} placeholder="Leave blank for a general reading" />
           </div>
-          <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: '0.85rem', color: 'var(--ink-dim)' }}>
-            <input type="checkbox" checked={allowReversals} onChange={(e) => setAllowReversals(e.target.checked)} />
-            Allow reversed cards
-          </label>
-          <button className="btn btn-primary btn-block" style={{ marginTop: 14 }} onClick={beginDraw}>
-            Shuffle &amp; Draw
+          {mode === 'digital' && (
+            <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: '0.85rem', color: 'var(--ink-dim)' }}>
+              <input type="checkbox" checked={allowReversals} onChange={(e) => setAllowReversals(e.target.checked)} />
+              Allow reversed cards
+            </label>
+          )}
+          <button className="btn btn-primary btn-block" style={{ marginTop: 14 }} onClick={begin}>
+            {mode === 'digital' ? 'Shuffle & Draw' : 'Start Recording'}
           </button>
         </div>
       )}
 
-      {drawn && (
+      {slots && (
         <>
           <div className="card-grid">
-            {drawn.map((entry, i) => (
+            {slots.map((entry, i) => (
               <div className="card-slot" key={entry.label}>
                 <span className="label">{entry.label}</span>
-                {revealed.has(i) ? (
-                  <CardFace drawn={entry.drawn} onClick={() => setSelectedIndex(i)} />
+                {entry.drawn ? (
+                  mode === 'digital' && !revealed.has(i) ? (
+                    <CardBack onClick={() => reveal(i)} />
+                  ) : (
+                    <CardFace drawn={entry.drawn} onClick={() => setSelected({ list: 'main', index: i })} />
+                  )
                 ) : (
-                  <CardBack onClick={() => reveal(i)} />
+                  <div className="tarot-card back" style={{ opacity: 0.4 }}>
+                    <span className="glyph">?</span>
+                  </div>
                 )}
-                {revealed.has(i) && (
-                  <span className="caption">
-                    {entry.drawn.card.name}{entry.drawn.reversed ? ' (R)' : ''}
-                  </span>
+                {entry.drawn && (mode === 'physical' || revealed.has(i)) && (
+                  <span className="caption">{entry.drawn.card.name}{entry.drawn.reversed ? ' (R)' : ''}</span>
                 )}
               </div>
             ))}
           </div>
 
-          {supporting.length > 0 && (
-            <div className="card-grid" style={{ gridTemplateColumns: `repeat(${supporting.length}, 1fr)` }}>
-              {supporting.map((entry, i) => (
-                <div className="card-slot" key={entry.label}>
-                  <span className="label">{entry.label}</span>
-                  <CardFace drawn={entry.drawn} onClick={() => setSelectedIndex(drawn.length + i)} />
-                  <span className="caption">{entry.drawn.card.name}{entry.drawn.reversed ? ' (R)' : ''}</span>
-                </div>
-              ))}
+          {mode === 'physical' && !allFilled && (
+            <div className="panel">
+              <p className="muted">Which card did you pull for <strong>{slots.find((s) => s.drawn === null)?.label}</strong>?</p>
+              <CardPicker onPick={fillNextSlot} />
             </div>
           )}
 
-          {selectedIndex !== null && allCards[selectedIndex] && (
-            <CardDetail drawn={allCards[selectedIndex].drawn} onClose={() => setSelectedIndex(null)} />
+          {supporting.length > 0 && (
+            <div className="card-grid" style={{ gridTemplateColumns: `repeat(${supporting.length}, 1fr)` }}>
+              {supporting.map((entry, i) =>
+                entry.drawn ? (
+                  <div className="card-slot" key={entry.label}>
+                    <span className="label">{entry.label}</span>
+                    <CardFace drawn={entry.drawn} onClick={() => setSelected({ list: 'supporting', index: i })} />
+                    <span className="caption">{entry.drawn.card.name}{entry.drawn.reversed ? ' (R)' : ''}</span>
+                  </div>
+                ) : null,
+              )}
+            </div>
           )}
 
-          {allRevealed && (
+          {selectedDrawn && (
+            <CardDetail drawn={selectedDrawn} onClose={() => setSelected(null)} />
+          )}
+
+          {allRevealed && allFilled && (
             <div className="panel">
-              <button className="btn btn-ghost btn-block" onClick={pullSupporting}>
-                + Pull a supporting card (if it's not clear yet)
-              </button>
+              {mode === 'digital' ? (
+                <button className="btn btn-ghost btn-block" onClick={pullSupportingDigital}>
+                  + Pull a supporting card (if it's not clear yet)
+                </button>
+              ) : pickingSupporting ? (
+                <CardPicker onPick={addSupportingPhysical} />
+              ) : (
+                <button className="btn btn-ghost btn-block" onClick={() => setPickingSupporting(true)}>
+                  + Add a supporting card (if you pulled one)
+                </button>
+              )}
 
               <hr className="divider" />
 
@@ -209,7 +281,7 @@ export function DrawScreen({
               <button className="btn btn-primary btn-block" onClick={saveToJournal} disabled={saved}>
                 {saved ? 'Saved to Journal ✓' : 'Save to Journal'}
               </button>
-              <button className="btn btn-ghost btn-block" style={{ marginTop: 8 }} onClick={() => setDrawn(null)}>
+              <button className="btn btn-ghost btn-block" style={{ marginTop: 8 }} onClick={() => setSlots(null)}>
                 New Reading
               </button>
             </div>
